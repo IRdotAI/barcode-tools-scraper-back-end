@@ -20,6 +20,10 @@ _lock = asyncio.Lock()
 
 SESSION_MAX_AGE = 3600
 
+# Simple result cache — avoid re-searching the same term
+_cache: dict = {}  # key -> (timestamp, result)
+CACHE_TTL = 1800   # 30 minutes
+
 
 async def _ensure_browser():
     global _pw, _browser, _context, _last_init
@@ -81,11 +85,52 @@ async def _ensure_browser():
 
 
 async def search_sainsburys(query: str, page_size: int = 24) -> dict:
+    # Check cache first
+    cache_key = f"{query.lower().strip()}:{page_size}"
+    if cache_key in _cache:
+        ts, cached_result = _cache[cache_key]
+        if time.time() - ts < CACHE_TTL:
+            log.info(f"Cache hit: {query}")
+            return cached_result
+
     await _ensure_browser()
 
     log.info(f"Searching: {query}")
 
     page = await _context.new_page()
+
+    # Block all the junk — images, CSS, fonts, media, tracking scripts
+    # Only let through: the HTML document and the product API call
+    async def block_junk(route: Route):
+        resource = route.request.resource_type
+        url = route.request.url
+
+        # Always allow the product API
+        if "/groceries-api/gol-services/product/v1/product" in url:
+            await route.continue_()
+            return
+
+        # Block heavy resource types
+        if resource in ("image", "stylesheet", "font", "media", "manifest"):
+            await route.abort()
+            return
+
+        # Block known tracking/analytics domains
+        blocklist = (
+            "google-analytics", "googletagmanager", "facebook",
+            "hotjar", "optimizely", "adobedtm", "demdex",
+            "doubleclick", "bat.bing", "criteo", "monetate",
+        )
+        if any(b in url for b in blocklist):
+            await route.abort()
+            return
+
+        # Allow everything else (HTML, JS needed for the API call)
+        await route.continue_()
+
+    await page.route("**/*", block_junk)
+
+    # Intercept the product API response
     captured = {"result": None}
     api_event = asyncio.Event()
 
@@ -152,8 +197,13 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
     total = (data.get("controls") or {}).get("total_record_count", len(products))
     log.info(f"Found {total} products for: {query}")
 
-    return {
+    result = {
         "query": query,
         "total_count": total,
         "products": products,
     }
+
+    # Cache it
+    _cache[cache_key] = (time.time(), result)
+
+    return result
