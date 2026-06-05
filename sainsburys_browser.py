@@ -1,9 +1,9 @@
 """
 Sainsbury's product search via headless Chrome.
 
-Navigates to the actual search results page and intercepts the API
-response that Sainsbury's own JS makes. Returns as soon as the API
-response is captured — doesn't wait for images/CSS/full render.
+Startup: navigates to Sainsbury's to pass Akamai challenge (slow, once).
+Searches: navigates same page to search URL (fast, cookies already set).
+Intercepts the API response the instant it arrives.
 """
 
 import asyncio
@@ -11,13 +11,15 @@ import json
 import time
 import logging
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Route
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 log = logging.getLogger("sainsburys")
 
 _pw = None
 _browser: Optional[Browser] = None
 _context: Optional[BrowserContext] = None
+_page: Optional[Page] = None
+_warmed = False
 _last_init: float = 0
 _lock = asyncio.Lock()
 
@@ -25,7 +27,7 @@ SESSION_MAX_AGE = 3600
 
 
 async def _boot():
-    global _pw, _browser, _context, _last_init
+    global _pw, _browser, _context, _page, _warmed, _last_init
 
     log.info("Booting Playwright Chrome...")
 
@@ -58,15 +60,35 @@ async def _boot():
         window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {} };
     """)
 
+    _page = await _context.new_page()
+
+    # Warm up: navigate to Sainsbury's to pass Akamai challenge
+    # This is slow (~30-40s) but only happens once
+    log.info("Warming up — navigating to Sainsbury's...")
+    await _page.goto(
+        "https://www.sainsburys.co.uk/gol-ui/SearchResults/milk",
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )
+    await _page.wait_for_timeout(3000)
+
+    title = await _page.title()
+    log.info(f"Warm-up done — Title: {title}")
+
+    _warmed = "Access Denied" not in title
     _last_init = time.time()
-    log.info("Browser ready.")
+
+    if not _warmed:
+        log.error("Akamai blocked warm-up navigation")
 
 
 async def _ensure_browser():
     async with _lock:
         needs_init = (
             _browser is None
-            or not _browser.is_connected()
+            or _page is None
+            or _page.is_closed()
+            or not _warmed
             or (time.time() - _last_init) > SESSION_MAX_AGE
         )
         if needs_init:
@@ -75,8 +97,9 @@ async def _ensure_browser():
 
 
 async def _teardown():
-    global _pw, _browser, _context
-    for resource in (_context, _browser):
+    global _pw, _browser, _context, _page, _warmed
+    _warmed = False
+    for resource in (_page, _context, _browser):
         if resource:
             try:
                 await resource.close()
@@ -87,61 +110,56 @@ async def _teardown():
             await _pw.stop()
         except Exception:
             pass
-    _pw = _browser = _context = None
+    _pw = _browser = _context = _page = None
 
 
 async def search_sainsburys(query: str, page_size: int = 24) -> dict:
     """
-    Navigate to Sainsbury's search page in a fresh tab, intercept
-    the product API response, close the tab. Fast because we don't
-    wait for full page render — just the API JSON.
+    Navigate the warm page to a new search URL.
+    Akamai cookies are already set from warm-up, so this should be fast.
     """
     await _ensure_browser()
 
     log.info(f"Searching: {query}")
 
-    # Fresh page per search (avoids stale state, closes cleanly)
-    page = await _context.new_page()
     captured = {"data": None}
     api_event = asyncio.Event()
 
     async def on_response(response):
-        """Capture the product API response as soon as it arrives."""
         url = response.url
-        if "/groceries-api/gol-services/product/v1/product" in url and response.status == 200:
-            try:
-                body = await response.json()
-                captured["data"] = body
-                api_event.set()
-            except Exception:
-                pass
+        if "/groceries-api/gol-services/product/v1/product" in url:
+            if response.status == 200:
+                try:
+                    body = await response.json()
+                    captured["data"] = body
+                except Exception:
+                    pass
+            else:
+                log.warning(f"API returned {response.status}")
+            api_event.set()
 
-    page.on("response", on_response)
+    _page.on("response", on_response)
 
     try:
         search_url = f"https://www.sainsburys.co.uk/gol-ui/SearchResults/{query}"
+        await _page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
-        # Navigate — don't wait for full load, just until DOM is ready
-        await page.goto(search_url, wait_until="commit", timeout=30000)
-
-        # Wait for the API response (not the full page render)
+        # Wait for API response — should be fast since cookies are set
         try:
             await asyncio.wait_for(api_event.wait(), timeout=25.0)
         except asyncio.TimeoutError:
-            log.warning(f"API response timeout for: {query}")
-
-        if captured["data"] is None:
-            # Check page title — might be Access Denied
-            title = await page.title()
-            log.warning(f"No API data captured. Page title: {title}")
-            raise Exception("No product data received — Sainsbury's may be blocking this server")
-
-        data = captured["data"]
+            log.warning("API response timeout")
 
     finally:
-        await page.close()
+        _page.remove_listener("response", on_response)
 
-    # Normalise
+    if captured["data"] is None:
+        title = await _page.title()
+        log.warning(f"No data. Title: {title}")
+        raise Exception("No product data — try again")
+
+    data = captured["data"]
+
     products = []
     for p in data.get("products", []):
         ean = ""
@@ -161,6 +179,7 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
         })
 
     total = (data.get("controls") or {}).get("total_record_count", len(products))
+    log.info(f"Found {total} products for: {query}")
 
     return {
         "query": query,
