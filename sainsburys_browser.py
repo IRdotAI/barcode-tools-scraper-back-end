@@ -1,6 +1,6 @@
 """
 Sainsbury's product search via headless Chrome.
-Uses the approach that WORKED: navigate to search page, intercept API response.
+Navigate to search page, intercept API response. Cache for 30 min.
 """
 
 import asyncio
@@ -20,9 +20,9 @@ _lock = asyncio.Lock()
 
 SESSION_MAX_AGE = 3600
 
-# Simple result cache — avoid re-searching the same term
-_cache: dict = {}  # key -> (timestamp, result)
-CACHE_TTL = 1800   # 30 minutes
+# Cache: { "query:page_size" -> (timestamp, result) }
+_cache: dict = {}
+CACHE_TTL = 1800  # 30 minutes
 
 
 async def _ensure_browser():
@@ -37,7 +37,6 @@ async def _ensure_browser():
         if not needs_init:
             return
 
-        # Teardown old
         for r in (_context, _browser):
             if r:
                 try:
@@ -85,7 +84,7 @@ async def _ensure_browser():
 
 
 async def search_sainsburys(query: str, page_size: int = 24) -> dict:
-    # Check cache first
+    # Check cache
     cache_key = f"{query.lower().strip()}:{page_size}"
     if cache_key in _cache:
         ts, cached_result = _cache[cache_key]
@@ -98,44 +97,28 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
     log.info(f"Searching: {query}")
 
     page = await _context.new_page()
-
     captured = {"result": None}
     api_event = asyncio.Event()
 
-    # Single route handler: block junk, intercept API
-    async def handle_route(route: Route):
-        resource = route.request.resource_type
-        url = route.request.url
-
-        # Intercept the product API — capture response data
-        if "/groceries-api/gol-services/product/v1/product" in url:
-            try:
-                response = await route.fetch()
-                body = await response.body()
-                if response.status == 200 and body:
-                    try:
-                        captured["result"] = json.loads(body)
-                    except json.JSONDecodeError:
-                        pass
-                await route.fulfill(response=response)
-            except Exception as e:
-                log.warning(f"Intercept error: {e}")
+    async def intercept_api(route: Route):
+        try:
+            response = await route.fetch()
+            body = await response.body()
+            if response.status == 200 and body:
                 try:
-                    await route.continue_()
-                except Exception:
+                    captured["result"] = json.loads(body)
+                except json.JSONDecodeError:
                     pass
-            api_event.set()
-            return
+            await route.fulfill(response=response)
+        except Exception as e:
+            log.warning(f"Intercept error: {e}")
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+        api_event.set()
 
-        # Block heavy resources (but NOT scripts — Akamai needs them)
-        if resource in ("image", "font", "media"):
-            await route.abort()
-            return
-
-        # Allow everything else
-        await route.continue_()
-
-    await page.route("**/*", handle_route)
+    await page.route("**/groceries-api/gol-services/product/v1/product*", intercept_api)
 
     try:
         search_url = f"https://www.sainsburys.co.uk/gol-ui/SearchResults/{query}"
@@ -143,7 +126,6 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
 
         await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
 
-        # Wait for API response
         try:
             await asyncio.wait_for(api_event.wait(), timeout=30.0)
         except asyncio.TimeoutError:
@@ -186,7 +168,6 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
         "products": products,
     }
 
-    # Cache it
     _cache[cache_key] = (time.time(), result)
 
     return result
