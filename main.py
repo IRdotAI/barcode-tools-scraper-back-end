@@ -1,12 +1,27 @@
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from scraper import scrape_wethrift_coupons
-from sainsburys_browser import search_sainsburys
+from sainsburys_browser import search_sainsburys, _ensure_session
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Barcode Tools API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Boot Chrome + seed Akamai cookies on server startup (not on first request)
+    logging.info("Pre-warming Chrome session...")
+    try:
+        await _ensure_session()
+        logging.info("Chrome session warm and ready.")
+    except Exception as e:
+        logging.error(f"Chrome pre-warm failed: {e} — will retry on first request")
+    yield
+
+
+app = FastAPI(title="Barcode Tools API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,10 +67,6 @@ async def sainsburys_search(
     q: str = Query(..., description="Product search term"),
     page_size: int = Query(24, description="Results per page"),
 ):
-    """
-    Search Sainsbury's groceries via headless Chromium.
-    Bypasses Akamai bot protection by running fetch() inside a real browser.
-    """
     try:
         result = await search_sainsburys(q, page_size)
         return result
