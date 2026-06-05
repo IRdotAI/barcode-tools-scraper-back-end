@@ -4,20 +4,20 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from scraper import scrape_wethrift_coupons
-from sainsburys_browser import search_sainsburys, _ensure_session
+from sainsburys_browser import search_sainsburys, _ensure_browser
 
 logging.basicConfig(level=logging.INFO)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Boot Chrome + seed Akamai cookies on server startup (not on first request)
-    logging.info("Pre-warming Chrome session...")
+    # Pre-launch Chrome on startup so first search is faster
+    logging.info("Pre-launching Chrome...")
     try:
-        await _ensure_session()
-        logging.info("Chrome session warm and ready.")
+        await _ensure_browser()
+        logging.info("Chrome ready.")
     except Exception as e:
-        logging.error(f"Chrome pre-warm failed: {e} — will retry on first request")
+        logging.error(f"Chrome pre-launch failed: {e}")
     yield
 
 
@@ -36,8 +36,6 @@ app.add_middleware(
 def read_root():
     return {"status": "ok", "message": "Barcode Tools API is running."}
 
-
-# ── Coupon scraper (existing) ──────────────────────────────────────────────────
 
 @app.get("/api/scrape")
 def scrape_coupons(
@@ -59,8 +57,6 @@ def scrape_coupons(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── Sainsbury's product search (Playwright) ────────────────────────────────────
 
 @app.get("/api/sainsburys")
 async def sainsburys_search(
