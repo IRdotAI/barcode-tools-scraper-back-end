@@ -1,9 +1,6 @@
 """
 Sainsbury's product search via headless Chrome.
-
-Startup: navigates to Sainsbury's to pass Akamai challenge (slow, once).
-Searches: navigates same page to search URL (fast, cookies already set).
-Intercepts the API response the instant it arrives.
+Uses the approach that WORKED: navigate to search page, intercept API response.
 """
 
 import asyncio
@@ -11,154 +8,128 @@ import json
 import time
 import logging
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Route
 
 log = logging.getLogger("sainsburys")
 
 _pw = None
 _browser: Optional[Browser] = None
 _context: Optional[BrowserContext] = None
-_page: Optional[Page] = None
-_warmed = False
 _last_init: float = 0
 _lock = asyncio.Lock()
 
 SESSION_MAX_AGE = 3600
 
 
-async def _boot():
-    global _pw, _browser, _context, _page, _warmed, _last_init
-
-    log.info("Booting Playwright Chrome...")
-
-    _pw = await async_playwright().start()
-    _browser = await _pw.chromium.launch(
-        headless=True,
-        channel="chrome",
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-        ],
-    )
-
-    _context = await _browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1366, "height": 768},
-        locale="en-GB",
-        timezone_id="Europe/London",
-    )
-
-    await _context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {} };
-    """)
-
-    _page = await _context.new_page()
-
-    # Warm up: navigate to Sainsbury's to pass Akamai challenge
-    # This is slow (~30-40s) but only happens once
-    log.info("Warming up — navigating to Sainsbury's...")
-    await _page.goto(
-        "https://www.sainsburys.co.uk/gol-ui/SearchResults/milk",
-        wait_until="domcontentloaded",
-        timeout=60000,
-    )
-    await _page.wait_for_timeout(3000)
-
-    title = await _page.title()
-    log.info(f"Warm-up done — Title: {title}")
-
-    _warmed = "Access Denied" not in title
-    _last_init = time.time()
-
-    if not _warmed:
-        log.error("Akamai blocked warm-up navigation")
-
-
 async def _ensure_browser():
+    global _pw, _browser, _context, _last_init
+
     async with _lock:
         needs_init = (
             _browser is None
-            or _page is None
-            or _page.is_closed()
-            or not _warmed
+            or not _browser.is_connected()
             or (time.time() - _last_init) > SESSION_MAX_AGE
         )
-        if needs_init:
-            await _teardown()
-            await _boot()
+        if not needs_init:
+            return
 
-
-async def _teardown():
-    global _pw, _browser, _context, _page, _warmed
-    _warmed = False
-    for resource in (_page, _context, _browser):
-        if resource:
+        # Teardown old
+        for r in (_context, _browser):
+            if r:
+                try:
+                    await r.close()
+                except Exception:
+                    pass
+        if _pw:
             try:
-                await resource.close()
+                await _pw.stop()
             except Exception:
                 pass
-    if _pw:
-        try:
-            await _pw.stop()
-        except Exception:
-            pass
-    _pw = _browser = _context = _page = None
+
+        log.info("Booting Playwright Chrome...")
+        _pw = await async_playwright().start()
+        _browser = await _pw.chromium.launch(
+            headless=True,
+            channel="chrome",
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+
+        _context = await _browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1366, "height": 768},
+            locale="en-GB",
+            timezone_id="Europe/London",
+        )
+
+        await _context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {} };
+        """)
+
+        _last_init = time.time()
+        log.info("Chrome ready.")
 
 
 async def search_sainsburys(query: str, page_size: int = 24) -> dict:
-    """
-    Navigate the warm page to a new search URL.
-    Akamai cookies are already set from warm-up, so this should be fast.
-    """
     await _ensure_browser()
 
     log.info(f"Searching: {query}")
 
-    captured = {"data": None}
+    page = await _context.new_page()
+    captured = {"result": None}
     api_event = asyncio.Event()
 
-    async def on_response(response):
-        url = response.url
-        if "/groceries-api/gol-services/product/v1/product" in url:
-            if response.status == 200:
+    async def intercept_api(route: Route):
+        try:
+            response = await route.fetch()
+            body = await response.body()
+            if response.status == 200 and body:
                 try:
-                    body = await response.json()
-                    captured["data"] = body
-                except Exception:
+                    captured["result"] = json.loads(body)
+                except json.JSONDecodeError:
                     pass
-            else:
-                log.warning(f"API returned {response.status}")
-            api_event.set()
+            await route.fulfill(response=response)
+        except Exception as e:
+            log.warning(f"Intercept error: {e}")
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+        api_event.set()
 
-    _page.on("response", on_response)
+    await page.route("**/groceries-api/gol-services/product/v1/product*", intercept_api)
 
     try:
         search_url = f"https://www.sainsburys.co.uk/gol-ui/SearchResults/{query}"
-        await _page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        log.info(f"Navigating to: {search_url}")
 
-        # Wait for API response — should be fast since cookies are set
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+
+        # Wait for API response
         try:
-            await asyncio.wait_for(api_event.wait(), timeout=25.0)
+            await asyncio.wait_for(api_event.wait(), timeout=30.0)
         except asyncio.TimeoutError:
-            log.warning("API response timeout")
+            log.warning("API intercept timed out")
+
+        if captured["result"] is None:
+            title = await page.title()
+            log.warning(f"No data captured. Title: {title}")
+            raise Exception("No product data received")
 
     finally:
-        _page.remove_listener("response", on_response)
+        await page.close()
 
-    if captured["data"] is None:
-        title = await _page.title()
-        log.warning(f"No data. Title: {title}")
-        raise Exception("No product data — try again")
-
-    data = captured["data"]
+    data = captured["result"]
 
     products = []
     for p in data.get("products", []):

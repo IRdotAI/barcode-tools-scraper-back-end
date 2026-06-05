@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
@@ -11,11 +10,10 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Pre-launch Chrome on startup so first search is faster
     logging.info("Pre-launching Chrome...")
     try:
         await _ensure_browser()
-        logging.info("Chrome ready.")
+        logging.info("Chrome pre-launched.")
     except Exception as e:
         logging.error(f"Chrome pre-launch failed: {e}")
     yield
@@ -44,7 +42,6 @@ def scrape_coupons(
 ):
     try:
         coupons = scrape_wethrift_coupons(store)
-
         if min_discount != "any" and min_discount.isdigit():
             import re
             min_val = int(min_discount)
@@ -52,7 +49,6 @@ def scrape_coupons(
                 c for c in coupons
                 if any(int(n) >= min_val for n in re.findall(r'\d+', c['discount']))
             ]
-
         return {"store": store, "count": len(coupons), "coupons": coupons}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
