@@ -99,60 +99,43 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
 
     page = await _context.new_page()
 
-    # Block all the junk — images, CSS, fonts, media, tracking scripts
-    # Only let through: the HTML document and the product API call
-    async def block_junk(route: Route):
-        resource = route.request.resource_type
-        url = route.request.url
-
-        # Always allow the product API
-        if "/groceries-api/gol-services/product/v1/product" in url:
-            await route.continue_()
-            return
-
-        # Block heavy resource types
-        if resource in ("image", "stylesheet", "font", "media", "manifest"):
-            await route.abort()
-            return
-
-        # Block known tracking/analytics domains
-        blocklist = (
-            "google-analytics", "googletagmanager", "facebook",
-            "hotjar", "optimizely", "adobedtm", "demdex",
-            "doubleclick", "bat.bing", "criteo", "monetate",
-        )
-        if any(b in url for b in blocklist):
-            await route.abort()
-            return
-
-        # Allow everything else (HTML, JS needed for the API call)
-        await route.continue_()
-
-    await page.route("**/*", block_junk)
-
-    # Intercept the product API response
     captured = {"result": None}
     api_event = asyncio.Event()
 
-    async def intercept_api(route: Route):
-        try:
-            response = await route.fetch()
-            body = await response.body()
-            if response.status == 200 and body:
-                try:
-                    captured["result"] = json.loads(body)
-                except json.JSONDecodeError:
-                    pass
-            await route.fulfill(response=response)
-        except Exception as e:
-            log.warning(f"Intercept error: {e}")
-            try:
-                await route.continue_()
-            except Exception:
-                pass
-        api_event.set()
+    # Single route handler: block junk, intercept API
+    async def handle_route(route: Route):
+        resource = route.request.resource_type
+        url = route.request.url
 
-    await page.route("**/groceries-api/gol-services/product/v1/product*", intercept_api)
+        # Intercept the product API — capture response data
+        if "/groceries-api/gol-services/product/v1/product" in url:
+            try:
+                response = await route.fetch()
+                body = await response.body()
+                if response.status == 200 and body:
+                    try:
+                        captured["result"] = json.loads(body)
+                    except json.JSONDecodeError:
+                        pass
+                await route.fulfill(response=response)
+            except Exception as e:
+                log.warning(f"Intercept error: {e}")
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+            api_event.set()
+            return
+
+        # Block heavy resources (but NOT scripts — Akamai needs them)
+        if resource in ("image", "font", "media"):
+            await route.abort()
+            return
+
+        # Allow everything else
+        await route.continue_()
+
+    await page.route("**/*", handle_route)
 
     try:
         search_url = f"https://www.sainsburys.co.uk/gol-ui/SearchResults/{query}"
