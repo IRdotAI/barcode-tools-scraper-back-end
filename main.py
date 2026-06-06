@@ -1,23 +1,25 @@
-import os
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from scraper import scrape_wethrift_coupons
+from sainsburys_browser import search_sainsburys, _ensure_browser
 
 logging.basicConfig(level=logging.INFO)
 
-# Use proxy-based search (fast) if proxy is configured, else fall back to Playwright
-PROXY_HOST = os.getenv("PROXY_HOST", "")
 
-if PROXY_HOST:
-    logging.info("Proxy configured — using direct API mode (fast)")
-    from sainsburys_proxy import search_sainsburys
-else:
-    logging.info("No proxy configured — falling back to Playwright Chrome mode")
-    from sainsburys_browser import search_sainsburys
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.info("Pre-launching Chrome...")
+    try:
+        await _ensure_browser()
+        logging.info("Chrome pre-launched.")
+    except Exception as e:
+        logging.error(f"Chrome pre-launch failed: {e}")
+    yield
 
 
-app = FastAPI(title="Barcode Tools API")
+app = FastAPI(title="Barcode Tools API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,8 +32,7 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    mode = "proxy" if PROXY_HOST else "playwright"
-    return {"status": "ok", "mode": mode, "message": "Barcode Tools API is running."}
+    return {"status": "ok", "message": "Barcode Tools API is running."}
 
 
 @app.get("/api/scrape")
