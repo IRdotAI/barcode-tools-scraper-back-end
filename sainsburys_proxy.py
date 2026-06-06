@@ -1,11 +1,3 @@
-"""
-Sainsbury's product search via residential proxy.
-
-Direct HTTP requests through FlashProxy residential IPs with
-browser-grade TLS fingerprinting (curl_cffi). No Playwright,
-no Chrome, no page loading. Sub-2-second searches.
-"""
-
 import os
 import time
 import logging
@@ -13,8 +5,6 @@ from typing import Optional
 from curl_cffi.requests import AsyncSession
 
 log = logging.getLogger("sainsburys")
-
-# ── Proxy config from environment ─────────────────────────────────────────────
 
 PROXY_HOST     = os.getenv("PROXY_HOST", "")
 PROXY_PORT     = os.getenv("PROXY_PORT", "")
@@ -25,7 +15,6 @@ PROXY_COUNTRY  = os.getenv("PROXY_COUNTRY", "gb")
 
 
 def _build_proxy_url() -> Optional[str]:
-    """Build proxy URL from env vars. Returns None if not configured."""
     if not PROXY_HOST or not PROXY_PORT:
         return None
 
@@ -37,8 +26,6 @@ def _build_proxy_url() -> Optional[str]:
 
 
 PROXY_URL = _build_proxy_url()
-
-# ── Sainsbury's API ───────────────────────────────────────────────────────────
 
 SAINSBURYS_API = "https://www.sainsburys.co.uk/groceries-api/gol-services/product/v1/product"
 
@@ -59,22 +46,11 @@ HEADERS = {
     "Pragma": "no-cache",
 }
 
-# ── Cache ─────────────────────────────────────────────────────────────────────
-
 _cache: dict = {}
-CACHE_TTL = 1800  # 30 minutes
+CACHE_TTL = 1800
 
-
-# ── Search ────────────────────────────────────────────────────────────────────
 
 async def search_sainsburys(query: str, page_size: int = 24) -> dict:
-    """
-    Search Sainsbury's product API directly through residential proxy.
-    curl_cffi impersonates Chrome's TLS fingerprint so Akamai
-    can't distinguish this from a real browser.
-    """
-
-    # Check cache
     cache_key = f"{query.lower().strip()}:{page_size}"
     if cache_key in _cache:
         ts, cached_result = _cache[cache_key]
@@ -114,7 +90,6 @@ async def search_sainsburys(query: str, page_size: int = 24) -> dict:
 
     data = response.json()
 
-    # Normalise product data
     products = []
     for p in data.get("products", []):
         ean = ""

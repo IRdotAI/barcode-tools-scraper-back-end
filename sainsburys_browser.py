@@ -1,8 +1,3 @@
-"""
-Sainsbury's product search via headless Chrome.
-Navigate to search page, intercept API response. Cache for 30 min.
-"""
-
 import asyncio
 import json
 import time
@@ -20,9 +15,8 @@ _lock = asyncio.Lock()
 
 SESSION_MAX_AGE = 3600
 
-# Cache: { "query:page_size" -> (timestamp, result) }
 _cache: dict = {}
-CACHE_TTL = 1800  # 30 minutes
+CACHE_TTL = 1800
 
 
 async def _ensure_browser():
@@ -84,7 +78,6 @@ async def _ensure_browser():
 
 
 async def search_sainsburys(query: str, page_size: int = 24) -> dict:
-    # Check cache
     cache_key = f"{query.lower().strip()}:{page_size}"
     if cache_key in _cache:
         ts, cached_result = _cache[cache_key]

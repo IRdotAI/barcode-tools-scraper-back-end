@@ -1,7 +1,5 @@
 FROM python:3.12-slim
 
-# Install real Google Chrome — Akamai blocks Chromium's TLS fingerprint
-# Chrome bundles its own dependencies so we don't need playwright install-deps
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget gnupg2 ca-certificates \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \

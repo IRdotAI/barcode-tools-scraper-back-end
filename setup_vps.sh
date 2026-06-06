@@ -1,24 +1,15 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────
-# VPS setup script for Barcode Tools API
-# Run this on a fresh Ubuntu 22.04/24.04 HostVDS server
-#
-# Usage: ssh root@YOUR_VPS_IP 'bash -s' < setup_vps.sh
-# ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 echo "=== Barcode Tools VPS Setup ==="
 
-# ── System packages ──────────────────────────────────────────────────
 apt-get update -y
 apt-get install -y python3 python3-pip python3-venv git ufw curl
 
-# ── Firewall: allow SSH + API port ───────────────────────────────────
 ufw allow 22/tcp
 ufw allow 8000/tcp
 ufw --force enable
 
-# ── Clone or update repo ─────────────────────────────────────────────
 APP_DIR="/opt/barcode-tools"
 
 if [ -d "$APP_DIR" ]; then
@@ -29,13 +20,11 @@ else
     cd "$APP_DIR"
 fi
 
-# ── Python virtual env ───────────────────────────────────────────────
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# ── Environment file ─────────────────────────────────────────────────
 if [ ! -f .env ]; then
     cp .env.example .env
     echo ""
@@ -48,7 +37,6 @@ if [ ! -f .env ]; then
     echo ""
 fi
 
-# ── Systemd service (auto-start on boot, auto-restart on crash) ──────
 cat > /etc/systemd/system/barcode-api.service << 'EOF'
 [Unit]
 Description=Barcode Tools API
